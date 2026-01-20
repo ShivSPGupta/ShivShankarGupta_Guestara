@@ -89,7 +89,7 @@ const Booking = sequelize.define(
       { fields: ["status"] },
       { fields: ["item_id", "booking_date", "start_time"] },
     ],
-  }
+  },
 );
 
 module.exports = Booking;

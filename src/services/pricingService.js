@@ -5,7 +5,7 @@ class PricingService {
    * Get effective tax for an item (with inheritance)
    */
   static async getEffectiveTax(item) {
-    // If item has tax defined, use it
+    // Priority 1: Check if item has tax defined
     if (item.tax_applicable !== null && item.tax_applicable !== undefined) {
       return {
         applicable: item.tax_applicable,
@@ -14,7 +14,7 @@ class PricingService {
       };
     }
 
-    // Check subcategory
+    // Priority 2: Check subcategory
     if (item.subcategory) {
       if (
         item.subcategory.tax_applicable !== null &&
@@ -26,12 +26,21 @@ class PricingService {
           inherited_from: "subcategory",
         };
       }
+
+      // Priority 3: Check category through subcategory
+      if (item.subcategory.category) {
+        return {
+          applicable: item.subcategory.category.tax_applicable || false,
+          percentage: item.subcategory.category.tax_percentage || 0,
+          inherited_from: "category",
+        };
+      }
     }
 
-    // Check category
+    // Priority 4: Check category directly (if item belongs to category without subcategory)
     if (item.category) {
       return {
-        applicable: item.category.tax_applicable,
+        applicable: item.category.tax_applicable || false,
         percentage: item.category.tax_percentage || 0,
         inherited_from: "category",
       };
@@ -89,17 +98,27 @@ class PricingService {
     const basePrice = parseFloat(config.base_price || 0);
     const discount = config.discount || {};
 
+    let discountAmount = 0;
     let finalPrice = basePrice;
 
     if (discount.type === "percentage") {
-      const discountAmount = (basePrice * parseFloat(discount.value)) / 100;
+      discountAmount = (basePrice * parseFloat(discount.value)) / 100;
       finalPrice = basePrice - discountAmount;
     } else if (discount.type === "flat") {
-      finalPrice = basePrice - parseFloat(discount.value);
+      discountAmount = parseFloat(discount.value);
+      finalPrice = basePrice - discountAmount;
     }
 
     // Ensure price never goes negative
-    return Math.max(0, finalPrice);
+    finalPrice = Math.max(0, finalPrice);
+
+    return {
+      originalPrice: basePrice,
+      discountType: discount.type,
+      discountValue: discount.value,
+      discountAmount: discountAmount,
+      finalPrice: finalPrice,
+    };
   }
 
   /**
@@ -145,22 +164,46 @@ class PricingService {
 
     switch (item.pricing_type) {
       case "static":
-        return this.calculateStaticPrice(config);
+        return {
+          basePrice: this.calculateStaticPrice(config),
+          details: null,
+        };
 
       case "tiered":
         if (!params.units && !params.duration) {
           throw new Error("Units or duration required for tiered pricing");
         }
-        return this.calculateTieredPrice(
-          config,
-          params.units || params.duration
-        );
+        return {
+          basePrice: this.calculateTieredPrice(
+            config,
+            params.units || params.duration,
+          ),
+          details: {
+            units: params.units || params.duration,
+            tier_used: this.getSelectedTier(
+              config,
+              params.units || params.duration,
+            ),
+          },
+        };
 
       case "complimentary":
-        return this.calculateComplimentaryPrice();
+        return {
+          basePrice: this.calculateComplimentaryPrice(),
+          details: null,
+        };
 
       case "discounted":
-        return this.calculateDiscountedPrice(config);
+        const discountDetails = this.calculateDiscountedPrice(config);
+        return {
+          basePrice: discountDetails.finalPrice,
+          details: {
+            original_price: discountDetails.originalPrice,
+            discount_type: discountDetails.discountType,
+            discount_value: discountDetails.discountValue,
+            discount_amount: discountDetails.discountAmount,
+          },
+        };
 
       case "dynamic":
         if (!params.time) {
@@ -170,11 +213,56 @@ class PricingService {
         if (price === null) {
           throw new Error("Item not available at the requested time");
         }
-        return price;
+        return {
+          basePrice: price,
+          details: {
+            requested_time: params.time,
+            time_window_used: this.getTimeWindow(config, params.time),
+          },
+        };
 
       default:
         throw new Error(`Unknown pricing type: ${item.pricing_type}`);
     }
+  }
+
+  /**
+   * Helper: Get selected tier for tiered pricing
+   */
+  static getSelectedTier(config, units) {
+    if (!config.tiers || !Array.isArray(config.tiers)) return null;
+
+    const sortedTiers = config.tiers.sort((a, b) => a.max_units - b.max_units);
+
+    for (const tier of sortedTiers) {
+      if (units <= tier.max_units) {
+        return `Up to ${tier.max_units} ${tier.max_units === 1 ? "unit" : "units"}`;
+      }
+    }
+
+    const highestTier = sortedTiers[sortedTiers.length - 1];
+    return `Up to ${highestTier.max_units} ${highestTier.max_units === 1 ? "unit" : "units"}`;
+  }
+
+  /**
+   * Helper: Get time window for dynamic pricing
+   */
+  static getTimeWindow(config, time) {
+    if (!config.time_windows || !Array.isArray(config.time_windows))
+      return null;
+
+    const requestTime = this.parseTime(time);
+
+    for (const window of config.time_windows) {
+      const startTime = this.parseTime(window.start);
+      const endTime = this.parseTime(window.end);
+
+      if (requestTime >= startTime && requestTime < endTime) {
+        return `${window.start} - ${window.end}`;
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -204,11 +292,22 @@ class PricingService {
     // Fetch item with relationships
     const item = await Item.findByPk(itemId, {
       include: [
-        { model: Category, as: "category" },
+        {
+          model: Category,
+          as: "category",
+          attributes: ["id", "name", "tax_applicable", "tax_percentage"],
+        },
         {
           model: Subcategory,
           as: "subcategory",
-          include: [{ model: Category, as: "category" }],
+          attributes: ["id", "name", "tax_applicable", "tax_percentage"],
+          include: [
+            {
+              model: Category,
+              as: "category",
+              attributes: ["id", "name", "tax_applicable", "tax_percentage"],
+            },
+          ],
         },
         {
           model: Addon,
@@ -228,7 +327,9 @@ class PricingService {
     }
 
     // Calculate base price
-    const basePrice = await this.calculateBasePrice(item, params);
+    const priceResult = await this.calculateBasePrice(item, params);
+    const basePrice = priceResult.basePrice;
+    const pricingDetails = priceResult.details;
 
     // Calculate addons total
     const addonIds = params.addons || [];
@@ -255,27 +356,35 @@ class PricingService {
     // Calculate grand total
     const grandTotal = subtotal + taxAmount;
 
+    // Build response
+    const breakdown = {
+      pricing_type: item.pricing_type,
+      base_price: parseFloat(basePrice.toFixed(2)),
+      addons: selectedAddons.map((a) => ({
+        id: a.id,
+        name: a.name,
+        price: parseFloat(a.price),
+      })),
+      addons_total: parseFloat(addonsTotal.toFixed(2)),
+      subtotal: parseFloat(subtotal.toFixed(2)),
+      tax: {
+        applicable: taxInfo.applicable,
+        percentage: taxInfo.percentage,
+        amount: parseFloat(taxAmount.toFixed(2)),
+        inherited_from: taxInfo.inherited_from,
+      },
+      grand_total: parseFloat(grandTotal.toFixed(2)),
+    };
+
+    // Add pricing-specific details
+    if (pricingDetails) {
+      breakdown.pricing_details = pricingDetails;
+    }
+
     return {
       item_id: item.id,
       item_name: item.name,
-      pricing_breakdown: {
-        pricing_type: item.pricing_type,
-        base_price: parseFloat(basePrice.toFixed(2)),
-        addons: selectedAddons.map((a) => ({
-          id: a.id,
-          name: a.name,
-          price: parseFloat(a.price),
-        })),
-        addons_total: parseFloat(addonsTotal.toFixed(2)),
-        subtotal: parseFloat(subtotal.toFixed(2)),
-        tax: {
-          applicable: taxInfo.applicable,
-          percentage: taxInfo.percentage,
-          amount: parseFloat(taxAmount.toFixed(2)),
-          inherited_from: taxInfo.inherited_from,
-        },
-        grand_total: parseFloat(grandTotal.toFixed(2)),
-      },
+      pricing_breakdown: breakdown,
     };
   }
 }

@@ -63,7 +63,7 @@ class BookingService {
 
     const config = item.availability_config;
     const date = new Date(bookingDate);
-    const dayName = date.toLocaleDateString("en-US", { weekday: "long" });
+    const dayName = date.toLocaleDateString("en-IN", { weekday: "long" });
 
     // Check if day is available
     if (config.days && Array.isArray(config.days)) {

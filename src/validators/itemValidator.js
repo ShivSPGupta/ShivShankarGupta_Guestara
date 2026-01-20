@@ -20,7 +20,7 @@ const tieredPricingSchema = Joi.object({
         price: Joi.number().min(0).required().messages({
           "any.required": "Price is required for each tier",
         }),
-      })
+      }),
     )
     .min(1)
     .required()
@@ -68,7 +68,7 @@ const dynamicPricingSchema = Joi.object({
         price: Joi.number().min(0).required().messages({
           "any.required": "Price is required for each time window",
         }),
-      })
+      }),
     )
     .min(1)
     .required()
@@ -131,8 +131,8 @@ const createItemSchema = Joi.object({
             "Thursday",
             "Friday",
             "Saturday",
-            "Sunday"
-          )
+            "Sunday",
+          ),
         )
         .optional(),
       time_slots: Joi.array()
@@ -144,7 +144,7 @@ const createItemSchema = Joi.object({
             end: Joi.string()
               .pattern(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/)
               .required(),
-          })
+          }),
         )
         .optional(),
     }).allow(null),
@@ -160,20 +160,20 @@ const createItemSchema = Joi.object({
         description: Joi.string().allow(null, "").optional(),
         price: Joi.number().min(0).required(),
         is_mandatory: Joi.boolean().default(false),
-      })
+      }),
     )
     .optional(),
 }).custom((value, helpers) => {
   // Custom validation: must have either category_id OR subcategory_id, not both
   if (!value.category_id && !value.subcategory_id) {
-    return helpers.error("any.invalid", {
-      message: "Item must belong to either category or subcategory",
-    });
+    return helpers.message(
+      "Item must belong to either category or subcategory",
+    );
   }
   if (value.category_id && value.subcategory_id) {
-    return helpers.error("any.invalid", {
-      message: "Item cannot belong to both category and subcategory",
-    });
+    return helpers.message(
+      "Item cannot belong to both category and subcategory",
+    );
   }
   return value;
 });
